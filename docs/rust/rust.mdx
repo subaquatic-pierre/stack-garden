@@ -53,6 +53,69 @@ cargo doc --open                # build and open docs in browser
 cargo doc --no-deps             # only your crate, skip dependencies
 ```
 
+### Targeting specific packages
+
+Use `-p <name>` to scope any cargo command to a single crate — a workspace member *or* a dependency. The package name is the crate name from `Cargo.toml`, not the directory name. In workspaces, `-p` is the default way to avoid rebuilding the entire tree when you only care about one member.
+
+```bash
+# Type-check a single package (fast, no codegen)
+cargo check -p my-crate
+cargo check -p serde_json          # works on dependencies too
+
+# Build only one package
+cargo build -p my-crate
+cargo build -p axum --release
+
+# Run only that package's tests
+cargo test -p my-crate
+cargo test -p serde_json -- --nocapture
+
+# Lint a single package
+cargo clippy -p my-crate
+cargo clippy -p tokio -- -D warnings
+
+# Clean a single package's artifacts
+cargo clean -p my-crate
+cargo clean -p reqwest && cargo build -p reqwest   # force recompile one dep
+```
+
+If two dependencies share a name (rare), disambiguate with a full package-id spec: `cargo check -p 'serde@1.0'` or `cargo check -p 'https://github.com/user/repo#0.4'`.
+
+### Cleaning build artifacts
+
+Remove stale artifacts when switching targets, profiles, or toolchains — `cargo` caches builds aggressively, and a stale `target/` can cause confusing errors. `cargo clean` is also useful before a clean CI build or when disk space is tight.
+
+```bash
+# Full target directory wipe
+cargo clean                     # removes target/ (debug + release + all profiles)
+cargo clean --release           # removes only target/release/
+cargo clean --doc               # removes only target/doc/
+cargo clean --profile ci        # removes a specific profile directory
+
+# Workspace-aware cleaning
+cargo clean --workspace         # clean the entire workspace (default when no -p given)
+cargo clean -p my-crate         # clean only a specific workspace member
+
+# Cross-compilation cleanup
+cargo clean --target wasm32-unknown-unknown   # clean for a specific target
+cargo clean --target-dir /custom/build/dir    # clean from a non-default target directory
+
+# Safety & preview
+cargo clean --dry-run           # preview what would be deleted (add -v for file list)
+```
+
+**When to reach for `cargo clean`:**
+
+| Scenario | Command |
+|---|---|
+| Switching from debug to release and getting weird errors | `cargo clean` |
+| After changing `Cargo.toml` build profiles | `cargo clean` |
+| Before a fresh CI build | `cargo clean && cargo build --release` |
+| Freeing up disk space without nuking everything | `cargo clean --release` then `cargo build` |
+| Cross-compilation target change | `cargo clean --target <triple>` |
+
+`cargo clean` only removes generated artifacts — it never touches your source or `Cargo.lock`. A full rebuild after `cargo clean` downloads nothing (crates are cached in `~/.cargo/registry`), only recompiles.
+
 ### Cargo.toml essentials
 
 `Cargo.toml` is the single source of truth for a Rust project — package metadata, dependencies, and build settings. Dependency features (like `serde`'s `derive`) opt into optional functionality, and the `[profile.release]` section tunes the size and speed of the production binary.
