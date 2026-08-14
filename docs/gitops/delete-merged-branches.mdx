@@ -1,0 +1,211 @@
+---
+sidebar_position: 4
+title: 'Delete Merged Git Branches'
+description: 'Prune branches that have been merged: list merged branches (local and remote), delete them safely, and clean up stale remote-tracking refs.'
+tags: [git, branches, cleanup, gitops, pruning, reference, how-to]
+last_updated: '2026-08-14'
+---
+
+# Delete Merged Git Branches
+
+## Overview
+
+Over time a repository accumulates feature and fix branches that were already merged and are safe to remove. Deleting them keeps `git branch` output readable and avoids accidentally continuing work on a stale branch.
+
+This guide covers every step of the cleanup: listing merged branches (local and remote), deleting them, and pruning remote-tracking refs so your local view stays in sync with the remote.
+
+## Understanding "merged"
+
+A branch counts as *merged* when its commits are reachable from another branch (usually `main`). Git determines this with the `--merged` flag:
+
+- `git branch --merged` — branches merged into **the current branch** (HEAD).
+- `git branch --merged main` — branches merged into **a specific branch** (recommended; be explicit about the target).
+- `git branch --no-merged` — the inverse: branches with work that is **not** yet merged (don't delete these).
+
+:::note
+`--merged` only reports branches whose *tips* are reachable. A branch that was partially cherry-picked or rebased may still appear "unmerged" even if its work is effectively in `main` — always review before deleting.
+:::
+
+## List merged branches
+
+### Local branches
+
+```bash
+git branch --merged              # merged into the current branch
+git branch --merged main         # merged into main (preferred — explicit target)
+git branch --merged origin/main  # merged into the remote main ref
+git branch --no-merged           # NOT merged (protect these)
+```
+
+Add metadata to make the list more useful before deleting:
+
+```bash
+git branch --merged -v          # list with last commit message
+git branch --merged --sort=-committerdate   # newest first
+```
+
+The current branch is always prefixed with `*` — filter it out before piping to a delete command.
+
+### Remote-tracking branches
+
+```bash
+git branch -r --merged           # remote branches merged into current HEAD
+git branch -r --merged main      # remote branches merged into main
+git branch -a --merged           # local + remote, merged
+```
+
+Remote refs are shown as `origin/<branch>`; strip the `origin/` prefix before pushing deletions, and skip the `HEAD` symbolic ref.
+
+## Delete merged branches locally
+
+### One at a time (safe)
+
+`git branch -d` refuses to delete a branch that isn't fully merged, so it's the safe default:
+
+```bash
+git branch -d feature/cache      # safe — errors if the branch has unmerged work
+git branch -D feature/cache      # force delete (discards unmerged commits)
+```
+
+### Delete all merged branches in one command
+
+The standard pattern pipes the merged list through a filter (to protect `main`/`master` and skip the `*` current branch) into `git branch -d`:
+
+```bash
+# Delete every branch merged into main, except the protected ones
+git branch --merged main | grep -vE '^\*|main|master|develop' | xargs -n 1 git branch -d
+```
+
+Breakdown:
+
+| Fragment | Purpose |
+|---|---|
+| `git branch --merged main` | List branches merged into `main`. |
+| `grep -vE '^\*\|main\|master\|develop'` | Exclude the current branch (`*`) and protected branches. |
+| `xargs -n 1 git branch -d` | Delete each remaining branch safely (`-d`, not `-D`). |
+
+On macOS/BSD the grep pattern is the same, but `xargs -n 1` guarantees one branch per invocation, which is the most portable form.
+
+### Use `--format` for a cleaner list
+
+`git branch --merged` prints decorative columns. Use `--format` to get just the names, avoiding grep surprises:
+
+```bash
+git branch --merged main --format='%(refname:short)' | grep -vE '^(main|master|develop)$' | xargs -n 1 git branch -d
+```
+
+## Delete merged branches on the remote
+
+Deleting local branches does **not** delete them on the remote. To fully clean up, push the deletion:
+
+### One at a time
+
+```bash
+git push origin --delete feature/cache   # delete a single remote branch
+git push origin :feature/cache           # equivalent shorthand
+```
+
+### All merged remote branches in one command
+
+First fetch and prune so your remote-tracking refs are up to date, then list merged remote branches, strip the `origin/` prefix, and delete each on the remote:
+
+```bash
+git fetch --prune
+
+git branch -r --merged main \
+  | grep -vE 'HEAD|main|master|develop' \
+  | sed 's|origin/||' \
+  | xargs -n 1 git push origin --delete
+```
+
+:::warning
+`git push origin --delete` is destructive and affects everyone on the repo. Confirm the list before running the deletion — dry-run by omitting the final `| xargs ...` pipe to print the branches that *would* be deleted.
+:::
+
+## Prune stale remote-tracking refs
+
+When a branch is deleted on the remote, your local `origin/<branch>` ref lingers until you prune it. These stale refs keep `git branch -r --merged` output cluttered and misleading:
+
+```bash
+git fetch --prune            # fetch and remove local refs for branches deleted on the remote
+git fetch -p                 # shorthand for --prune
+git remote prune origin      # prune only stale refs (no fetch)
+```
+
+Make pruning the default on fetch:
+
+```bash
+git config --global fetch.prune true
+```
+
+## Full cleanup workflow
+
+The complete end-to-end routine, in order:
+
+```bash
+# 1. Refresh remote-tracking refs and drop stale ones
+git fetch --prune
+
+# 2. Review what's merged (local)
+git branch --merged main -v
+
+# 3. Review what's merged (remote)
+git branch -r --merged main
+
+# 4. Delete local merged branches (protecting main/master/develop)
+git branch --merged main | grep -vE '^\*|main|master|develop' | xargs -n 1 git branch -d
+
+# 5. Delete remote merged branches
+git branch -r --merged main \
+  | grep -vE 'HEAD|main|master|develop' \
+  | sed 's|origin/||' \
+  | xargs -n 1 git push origin --delete
+
+# 6. Prune again so local refs match the remote
+git remote prune origin
+```
+
+## Aliases
+
+Add these to `~/.gitconfig` or set with `git config --global alias.<name> "<command>"` to make cleanup a one-liner:
+
+```ini
+[alias]
+  # List branches merged into main
+  merged = branch --merged main
+  # List remote branches merged into main
+  mergedr = branch -r --merged main
+  # Delete all local branches merged into main (protects main/master/develop)
+  prune-merged = "!git branch --merged main | grep -vE '^\\*|main|master|develop' | xargs -n 1 git branch -d"
+```
+
+Then run `git prune-merged` after every merge. Note that aliases run from the repo root by default, so the `!` shell form is used for piped commands.
+
+## Safety checklist
+
+- Always use `git branch -d` (not `-D`) for merged branches — it errors on anything with unmerged work.
+- Exclude `main`, `master`, and `develop` from any batch deletion.
+- Run the **list** command first and eyeball the output before deleting.
+- Prefer `git push origin --delete` dry-run (print the list) before executing remote deletions.
+- Remember that `--merged` defaults to the *current* HEAD; pass an explicit target (`main`) to avoid surprises.
+
+## Quick reference table
+
+| Task | Command |
+|---|---|
+| List branches merged into main | `git branch --merged main` |
+| List branches NOT merged | `git branch --no-merged` |
+| List remote branches merged | `git branch -r --merged main` |
+| Delete one local branch (safe) | `git branch -d feature/cache` |
+| Force delete one local branch | `git branch -D feature/cache` |
+| Delete all local merged branches | `git branch --merged main \| grep -vE '^\*\|main\|master\|develop' \| xargs -n 1 git branch -d` |
+| Delete one remote branch | `git push origin --delete feature/cache` |
+| Delete all remote merged branches | `git branch -r --merged main \| sed 's\|origin/\|\|' \| xargs -n 1 git push origin --delete` |
+| Prune stale remote-tracking refs | `git fetch --prune` or `git remote prune origin` |
+| Prune on every fetch (default) | `git config --global fetch.prune true` |
+
+## See also
+
+- [Git Commands Reference](./git-commands.mdx) — the full branching, merging, and remote operations reference
+- [GitHub Actions & Workflows](./github-actions.mdx) — automating cleanup in CI
+- [Official Git docs — git-branch](https://git-scm.com/docs/git-branch)

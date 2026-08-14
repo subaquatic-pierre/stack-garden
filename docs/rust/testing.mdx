@@ -1,0 +1,454 @@
+---
+sidebar_position: 6
+title: 'Testing in Rust'
+description: 'Testing Rust crates end-to-end: unit tests with in-memory fakes, feature-gated integration tests against real databases, Cargo.toml test setup, mocking, async tests, and more.'
+tags: [rust, testing, cargo, unit-tests, integration-tests, feature-flags, mocking, reference]
+last_updated: '2026-08-14'
+---
+
+# Testing in Rust
+
+## Overview
+
+Rust ships a first-class test runner built into `cargo test`. This reference covers the full testing lifecycle, using a two-tier approach that separates **fast, mocked unit tests** (no infrastructure) from **feature-gated integration tests** that exercise a real database and cache. It also covers Cargo feature flags, `Cargo.toml` test configuration, mocking, async tests, and other techniques worth knowing.
+
+The core idea: keep the common path (unit tests) instant and hermetic, and isolate anything that needs real infrastructure behind a cargo **feature flag** so it only runs when explicitly requested.
+
+## Test tiers
+
+Split the suite into two tiers, separated by an `integration` cargo feature:
+
+| Tier | Scope | Infrastructure | Command |
+|---|---|---|---|
+| **Unit tests** | Services, stores, models | In-memory fakes only | `cargo test --lib` |
+| **Integration tests** | SQL queries, DB seed/migrate helpers | Real Postgres + Redis | `cargo test --features integration` |
+
+### Unit tests — mocked, no database or Redis
+
+Business logic is tested against in-memory fakes, so the entire logic layer runs with zero infrastructure. Two common patterns:
+
+- A configurable in-memory database executor — e.g. `store::dbx::MockDbx`, a safe in-memory `DbExecutor`. Register canned responses with helpers like `.with_one::<T>()`, `.with_optional::<T>()`, `.with_all::<T>()`, and `.with_execute()` (served FIFO per row type).
+- An in-memory cache executor with real read / write / `incr` / delete semantics — e.g. `cache::mock::MockChx`.
+
+```sh
+# from api/:
+cargo test --lib
+# or from the repo root:
+cargo test -p oxideauth --lib
+```
+
+### Integration tests — real Postgres + Redis
+
+The only tests that touch a real database are the SQL **query** tests and the DB seed/migration helpers, because the query layer (`store/queries/*`) is the sole place SQL is built and executed. Typical layout:
+
+- `tests/queries/{batch,contains,count,crud,join}.rs` — SQL query tests (kept out of the library).
+- `src/dev/db.rs` — reset / migrate / seed helpers.
+
+These are gated behind the `integration` feature (declared in `api/Cargo.toml`) and require a running Postgres + Redis. They read URLs from a test config (e.g. `postgres://test_user:password@localhost:5432/test_db`, `redis://127.0.0.1:6379`) and migrate + seed the database once via a shared init helper.
+
+```sh
+# Full suite — unit + integration (requires Postgres + Redis):
+cargo test -p oxideauth --features integration
+
+# Compile-check the integration suite without running it:
+cargo check -p oxideauth --tests --features integration
+```
+
+## Feature flags & Cargo.toml setup
+
+### Declaring the feature
+
+A feature flag is an optional, named set of dependencies and/or `cfg` toggles. Declaring an empty `integration` feature gives you a `#[cfg(feature = "integration")]` switch with no extra dependencies:
+
+```toml
+[features]
+default = []
+integration = []   # gate slow/real-infra tests behind this flag
+```
+
+You can also make a feature pull in dependencies that only integration tests need:
+
+```toml
+[features]
+default = []
+integration = ["dep:tokio", "dep:testcontainers"]
+```
+
+When a feature name matches an optional dependency (`dep:foo`), enabling the feature activates that dependency. Mark such dependencies `optional = true`:
+
+```toml
+[dependencies]
+tokio = { version = "1", optional = true }
+testcontainers = { version = "0.15", optional = true }
+```
+
+### Gating tests with `#[cfg(feature = ...)]`
+
+The integration entry point becomes a no-op unless the feature is enabled:
+
+```rust
+// tests/main.rs
+#[cfg(feature = "integration")]
+mod queries;
+
+#[cfg(feature = "integration")]
+fn main() {
+    // run the integration suite
+}
+```
+
+With this, a plain `cargo test` compiles the integration file but runs nothing from it, while `cargo test --features integration` runs the real suite.
+
+### Dev-dependencies
+
+Test-only dependencies (mock frameworks, tempfile, `tokio`'s test macros, `serde_json` for fixtures) go in `[dev-dependencies]` so they never bloat the published crate:
+
+```toml
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+mockall = "0.12"
+tempfile = "3"
+serde_json = "1"
+insta = "1"
+proptest = "1"
+```
+
+`[dev-dependencies]` are available to both inline `#[cfg(test)]` modules and files in `tests/`.
+
+### Per-target test configuration
+
+Control how each integration test binary is built and gated with explicit `[[test]]` sections:
+
+```toml
+[[test]]
+name = "main"
+path = "tests/main.rs"
+required-features = ["integration"]   # skip building unless the feature is on
+```
+
+`required-features` means `cargo test` silently skips the target when the feature is off (instead of compiling an empty harness). Combine this with `#[cfg(feature = "integration")]` in the file for belt-and-suspenders gating.
+
+### A complete example Cargo.toml
+
+```toml
+[package]
+name = "oxideauth"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+integration = []
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres"] }
+redis = { version = "0.24", features = ["tokio-comp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+mockall = "0.12"
+tempfile = "3"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+required-features = ["integration"]
+```
+
+## Test organization & structure
+
+Rust has two canonical test locations:
+
+```
+api/
+  src/                    inline #[cfg(test)] mod tests — unit tests (mocked)
+    services/
+      account.rs          # contains #[cfg(test)] mod tests { ... }
+  tests/                  integration tests (each file = separate test binary)
+    main.rs               #[cfg(feature = "integration")] mod queries;  ← gates the suite
+    queries/
+      mod.rs              declares the query test modules
+      batch.rs            store::queries::batch
+      contains.rs         store::queries::contains
+      count.rs            store::queries::count
+      crud.rs             store::queries::crud
+      join.rs             store::queries::join
+```
+
+### Inline unit tests
+
+Inline tests live next to the code they test, inside a `#[cfg(test)]` module. `#[cfg(test)]` strips the module from production builds entirely:
+
+```rust
+// src/services/account.rs
+pub fn get_balance(id: u64) -> Option<u64> {
+    // ... real implementation ...
+    Some(42)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_balance_found() {
+        assert_eq!(get_balance(1), Some(42));
+    }
+
+    #[test]
+    fn test_get_balance_missing() {
+        assert_eq!(get_balance(99), None);
+    }
+}
+```
+
+Key assertions and attributes:
+
+```rust
+#[test]
+fn it_works() {
+    assert_eq!(2 + 2, 4);
+    assert!(true);
+    assert_ne!(1, 2);
+}
+
+#[test]
+#[should_panic(expected = "boom")]
+fn it_panics() {
+    panic!("boom");
+}
+
+#[test]
+#[ignore]                      // skip unless -- --ignored is passed
+fn slow_test() { /* ... */ }
+```
+
+### Integration tests (`tests/`)
+
+Each `.rs` file directly under `tests/` compiles to its own test binary and imports your crate like an external user would (via the crate name). Use `tests/<name>/mod.rs` for shared modules (Rust does not support `tests/foo.rs` + `tests/foo/bar.rs` as one target).
+
+## Running tests
+
+`cargo test` builds the library plus all test targets and runs them. Scope it precisely to keep the loop fast:
+
+```bash
+cargo test                              # run everything (lib + doc + integration targets)
+cargo test --lib                        # unit tests only (inline #[cfg(test)])
+cargo test --test main                  # a single integration test binary (tests/main.rs)
+cargo test -p oxideauth                 # only one workspace member's tests
+cargo test -p oxideauth --lib           # that member's unit tests
+cargo test -p oxideauth --features integration   # enable the integration feature
+```
+
+### Filtering to a single test
+
+Cargo passes the filter to the test harness; match by (sub)string of the full test path:
+
+```sh
+# A single unit test (mocked, no DB):
+cargo test -p oxideauth --lib store::stores::account::tests::test_create_get_ok
+
+# A single query integration test (requires Postgres + Redis):
+cargo test -p oxideauth --features integration --test main queries::crud::test_create_and_get_pass
+```
+
+### Test harness flags (after `--`)
+
+Everything after `--` goes to the test binary, not cargo:
+
+```bash
+cargo test -- --nocapture         # show println! output from tests
+cargo test -- --test-threads=1    # run tests single-threaded (order-isolation / DB contention)
+cargo test -- --ignored           # run #[ignore]d tests only
+cargo test -- --include-ignored   # run both normal and ignored tests
+cargo test -- --exact             # exact (non-substring) test name match
+cargo test -- --list              # list tests without running them
+```
+
+### Compile-check without running
+
+`cargo check` verifies test code compiles without producing a binary — fast feedback in CI or before starting a DB:
+
+```bash
+cargo check --tests                    # type-check all test targets
+cargo check --tests --features integration   # include feature-gated targets
+cargo check --all-targets              # tests + examples + benches
+```
+
+## Async tests
+
+Async functions need a runtime. `#[tokio::test]` (or `#[tokio::test(flavor = "multi_thread")]`) wraps the test in a Tokio runtime:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_and_get() {
+        let db = MockDbx::new().with_one::<User>(user()).with_execute();
+        let cache = MockChx::new();
+        let svc = AccountService::new(db, cache);
+
+        let created = svc.create(NewUser { name: "ada".into() }).await.unwrap();
+        assert_eq!(created.name, "ada");
+    }
+}
+```
+
+Add the `macros` and `rt-multi-thread` features to `tokio` in `[dev-dependencies]` for the macro and multi-thread runtime. For `sqlx` and other pool-based code, `#[sqlx::test]` spins up an isolated test database per test.
+
+## Mocking
+
+Two complementary approaches:
+
+### Hand-rolled in-memory fakes
+
+For the data-access boundary, a fake that implements the same trait as the real thing is often clearer than a mocking framework:
+
+```rust
+// A configurable in-memory executor
+let db = MockDbx::new()
+    .with_one::<User>(user())       // next query expecting one row gets `user()`
+    .with_optional::<User>(None)    // next optional query returns None
+    .with_execute();                // next execute returns Ok(rows_affected)
+```
+
+Fakes keep tests hermetic and readable, and they naturally encode the FIFO response contract (`.with_one` / `.with_optional` / `.with_all` / `.with_execute` served in order per row type).
+
+### The `mockall` framework
+
+`mockall` generates mocks from traits with expectations and call-count verification:
+
+```rust
+use mockall::{automock, predicate::*};
+
+#[automock]
+pub trait Notifier {
+    fn notify(&self, to: &str, msg: &str) -> Result<(), Error>;
+}
+
+#[test]
+fn test_notify_is_called() {
+    let mut notifier = MockNotifier::new();
+    notifier
+        .expect_notify()
+        .with(eq("ops@example.com"), eq("deployed"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    let svc = DeployService::new(notifier);
+    svc.deploy().unwrap();
+}
+```
+
+Prefer fakes for broad interfaces you control and `mockall` for tight behavioral contracts (calls, ordering, counts).
+
+## Test fixtures & helpers
+
+- **Factories**: `fn user() -> User` constructors keep test data consistent and terse.
+- **`tempfile`**: create isolated temp dirs/files for tests that touch the filesystem, auto-cleaned on drop.
+- **`once` init**: for expensive shared setup (DB migrate/seed), use `std::sync::Once` or a `lazy_static`/`once_cell` so the suite migrates and seeds once, not per test.
+- **`#[cfg(test)]` helper modules**: put `mod test_utils` under `#[cfg(test)]` so helpers never ship in the library.
+
+## Other testing techniques worth knowing
+
+### Doc tests
+
+Code blocks in `///` doc comments are compiled and run as tests — great for keeping examples honest:
+
+```rust
+/// Returns the sum of two numbers.
+///
+/// ```
+/// let result = my_crate::add(2, 3);
+/// assert_eq!(result, 5);
+/// ```
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+```
+
+```bash
+cargo test --doc           # run only doc tests
+cargo test --doc add       # run a specific doc test
+```
+
+### Snapshot testing (`insta`)
+
+Snapshot tests record output to `snapshots/*.snap` and diff against it on later runs — ideal for serialized JSON, rendered templates, and error output:
+
+```rust
+#[test]
+fn test_serialized_user() {
+    let user = User { id: 1, name: "ada".into() };
+    insta::assert_json_snapshot!(user);
+}
+```
+
+Review/accept changes with `cargo insta review` (or set `INSTA_UPDATE=always`).
+
+### Property-based testing (`proptest`)
+
+Instead of hand-picking inputs, state properties that must hold for arbitrary generated inputs:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn roundtrip_doesnt_crash(s in "[a-z]{1,32}") {
+        let parsed: String = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        prop_assert_eq!(s, parsed);
+    }
+}
+```
+
+### Code coverage
+
+```bash
+cargo llvm-cov          # via cargo-llvm-cov: line/region coverage, HTML report
+cargo tarpaulin         # alternative coverage tool
+```
+
+## Best practices
+
+- **Keep unit tests hermetic.** No network, no filesystem (use `tempfile`), no time-of-day — inject clocks and config instead of reading them.
+- **Gate anything real behind a feature flag** so `cargo test` stays instant and CI can run the DB-dependent tier separately.
+- **One integration target per concern.** Keep SQL query tests isolated (`tests/queries/*`) so failures localize to the layer that owns the SQL.
+- **Fake at the boundary, not deep inside.** Mock the data-access/executor trait, not every function.
+- **Name tests for behavior**, e.g. `test_create_get_ok`, `test_get_missing_returns_none`, not `test_1`.
+- **Run formatting, clippy, and tests together in CI**:
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test --all-targets
+cargo test --features integration   # separate job, with DB + Redis services
+```
+
+## Quick reference table
+
+| Task | Command |
+|---|---|
+| Run all tests | `cargo test` |
+| Unit tests only | `cargo test --lib` |
+| One integration binary | `cargo test --test main` |
+| One workspace member | `cargo test -p oxideauth` |
+| With feature flag | `cargo test -p oxideauth --features integration` |
+| Single test (substring) | `cargo test --lib path::to::test` |
+| Show `println!` output | `cargo test -- --nocapture` |
+| Run ignored tests | `cargo test -- --ignored` |
+| Compile-check tests | `cargo check --tests` |
+| Compile-check with features | `cargo check --tests --features integration` |
+| Doc tests | `cargo test --doc` |
+| Coverage | `cargo llvm-cov` |
+
+## See also
+
+- [Rust](./rust.mdx) — cargo workflow and Cargo.toml essentials
+- [Rust Toolchain](./rust-toolchain.mdx) — rustup, targets, and components used across test environments
+- [Async & Futures](./async-futures.mdx) — the async runtime model behind `#[tokio::test]`
+- [The Rust Book — Writing Tests](https://doc.rust-lang.org/book/ch11-00-testing.html)
+- [Cargo Reference — `[features]`](https://doc.rust-lang.org/cargo/reference/features.html)
