@@ -1,0 +1,149 @@
+---
+sidebar_position: 3
+title: "OpenSpec — Spec-Driven Development"
+description: "Concise reference for the OpenSpec workflow: proposal, specs, design, tasks, apply, and archive artifacts for agentic spec-driven development."
+tags: [agentic-engineering, openspec, sdd, ai, workflow, reference]
+last_updated: "2026-08-17"
+---
+
+# OpenSpec — Spec-Driven Development
+
+## Overview
+
+OpenSpec is a spec-driven development (SDD) system for AI coding agents. It manages the full change lifecycle — proposal, specification, design, tasks, implementation, and archival — through a CLI (`openspec`) and slash commands that your agent runs step by step. Every change is captured as version-controlled planning artifacts before any code is written.
+
+## Core principles
+
+1. **Propose before you build** — capture what and why in a proposal before touching code.
+2. **Specify behavior, not implementation** — specs state what the system must do, not how to build it.
+3. **Design before tasks** — decide the technical approach before breaking work into steps.
+4. **Task before you implement** — break work into small, dependency-ordered, independently verifiable steps.
+5. **Archive after you ship** — merge completed delta specs into main specs so they stay current.
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) 20 or newer
+- npm (or another Node package manager)
+- An [OpenCode](https://opencode.ai/) or other supported AI coding agent
+- [Git](https://git-scm.com/) for version-controlled artifacts
+
+## Installation
+
+OpenSpec ships as a single global CLI. Install once and use everywhere:
+
+```bash
+npm install -g @fission-ai/openspec
+```
+
+Pin a specific release if needed:
+
+```bash
+npm install -g @fission-ai/openspec@1.9.0
+```
+
+## Initialize an OpenSpec project
+
+From the project root, run:
+
+```bash
+openspec init
+```
+
+This scaffolds an `openspec/` directory with:
+
+```
+openspec/
+├── config.yaml    # schema, context, rules, operations
+├── specs/         # main (committed) specs
+└── changes/       # active change proposals
+    └── archive/   # archived changes
+```
+
+`openspec init` can also configure AI-tool integration files non-interactively with `--tools` (for example `--tools opencode`).
+
+## Verification
+
+Confirm the CLI is working:
+
+```bash
+openspec --version
+```
+
+## Configuration
+
+`openspec/config.yaml` defines the workflow schema and captures durable project knowledge:
+
+| Key          | Purpose                                                                    |
+| ------------ | -------------------------------------------------------------------------- |
+| `schema`     | Workflow schema in use (default `spec-driven`).                            |
+| `context`    | Project facts — stack, conventions, constraints — as a multi-line block.   |
+| `rules`      | Per-artifact authoring rules, keyed by artifact id.                        |
+| `operations` | Advisory guidance for the `apply` and `archive` operations.                |
+
+## Commands reference
+
+### CLI
+
+| Command                  | Purpose                                                       |
+| ------------------------ | ------------------------------------------------------------- |
+| `openspec init`          | Initialize OpenSpec in a project.                             |
+| `openspec new change`    | Create a new change directory.                                |
+| `openspec list`          | List changes (or specs with `--specs`).                       |
+| `openspec status`        | Show artifact completion status for a change.                 |
+| `openspec instructions`  | Output instructions for an artifact, apply, or archive.       |
+| `openspec validate`      | Validate changes and specs.                                   |
+| `openspec show`          | Show a change or spec.                                        |
+| `openspec archive`       | Archive a completed change and update main specs.             |
+| `openspec schemas`       | List available workflow schemas.                              |
+| `openspec context`       | Print the working context for the resolved root.              |
+| `openspec doctor`        | Report relationship health for the resolved root.             |
+| `openspec store`         | Manage standalone OpenSpec repos registered on the machine.   |
+
+### Slash commands
+
+- `/opsx-propose` — create a change and generate all artifacts in one step.
+- `/opsx-apply` — implement tasks from a change.
+- `/opsx-archive` — finalize and archive a completed change.
+- `/opsx-explore` — think through ideas before or during a change.
+- `/opsx-sync-specs` — sync delta specs from a change to main specs.
+- `/opsx-update-change` — revise a change's planning artifacts.
+- `/opsx-rules` — create or update the project `config.yaml`.
+
+## Artifacts
+
+With the default `spec-driven` schema, each change produces:
+
+| Artifact       | Purpose                                                            |
+| -------------- | ------------------------------------------------------------------ |
+| `proposal.md`  | What and why — motivation, changes, capabilities, and impact.       |
+| `specs/*.md`   | Delta specs — what the system must do (requirements).               |
+| `design.md`    | How — technical decisions and rationale.                            |
+| `tasks.md`     | Implementation checklist with `- [ ]` trackable tasks.              |
+
+## Development workflow
+
+### End-to-end flow
+
+1. **Propose** (`/opsx-propose`) — describe the change; the agent creates `proposal.md`, specs, design, and `tasks.md`.
+2. **Review** — inspect the artifacts and refine them as needed.
+3. **Apply** (`/opsx-apply`) — implement the tasks, checking each off as it completes.
+4. **Archive** (`/opsx-archive`) — merge completed deltas into main specs and archive the change.
+
+### Quick start
+
+```bash
+openspec init
+```
+
+Then in your coding agent:
+
+```
+/opsx-propose add a health check endpoint
+/opsx-apply
+/opsx-archive
+```
+
+## See also
+
+- [Spec Kit](./spec-kit.mdx) — spec-driven development workflow
+- [OpenCode Configuration](./opencode.mdx) — agent setup and customization
