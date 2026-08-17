@@ -34,3 +34,4 @@ dist/
 # Generic cache
 .cache/
 references
+openspec
